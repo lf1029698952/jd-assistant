@@ -5,6 +5,7 @@ import os
 import pickle
 import re
 import random
+import threading
 import time
 
 import requests
@@ -171,7 +172,6 @@ class Assistant(object):
             'fp': self.fp,
         }
 
-    @deprecated
     def login_by_username(self):
         if self.is_login:
             logger.info('登录成功')
@@ -965,7 +965,7 @@ class Assistant(object):
             return False
 
     @check_login
-    def submit_order_with_retry(self, retry=3, interval=4):
+    def submit_order_with_retry(self, retry=3, interval=1):
         """提交订单，并且带有重试功能
         :param retry: 重试次数
         :param interval: 重试间隔
@@ -986,7 +986,7 @@ class Assistant(object):
             return False
 
     @check_login
-    def submit_order_by_time(self, buy_time, retry=4, interval=5):
+    def submit_order_by_time(self, buy_time, retry=1, interval=1):
         """定时提交商品订单
 
         重要：该方法只适用于普通商品的提交订单，事先需要先将商品加入购物车并勾选✓。
@@ -1086,7 +1086,6 @@ class Assistant(object):
         except Exception as e:
             logger.error(e)
 
-    @deprecated
     def _get_seckill_url(self, sku_id):
         """获取商品的抢购链接
 
@@ -1108,7 +1107,7 @@ class Assistant(object):
             'Host': 'itemko.jd.com',
             'Referer': 'https://item.jd.com/{}.html'.format(sku_id),
         }
-        retry_interval = 0.5
+        retry_interval = 0.1
 
         while True:
             resp = self.sess.get(url=url, headers=headers, params=payload)
@@ -1124,7 +1123,6 @@ class Assistant(object):
                 logger.info("抢购链接获取失败，%s不是抢购商品或抢购页面暂未刷新，%s秒后重试", sku_id, retry_interval)
                 time.sleep(retry_interval)
 
-    @deprecated
     def request_seckill_url(self, sku_id):
         """访问商品的抢购链接（用于设置cookie等）
         :param sku_id: 商品id
@@ -1139,7 +1137,6 @@ class Assistant(object):
         }
         self.sess.get(url=self.seckill_url.get(sku_id), headers=headers, allow_redirects=False)
 
-    @deprecated
     def request_seckill_checkout_page(self, sku_id, num=1):
         """访问抢购订单结算页面
         :param sku_id: 商品id
@@ -1159,7 +1156,6 @@ class Assistant(object):
         }
         self.sess.get(url=url, params=payload, headers=headers)
 
-    @deprecated
     def _get_seckill_init_info(self, sku_id, num=1):
         """获取秒杀初始化信息（包括：地址，发票，token）
         :param sku_id:
@@ -1179,7 +1175,6 @@ class Assistant(object):
         resp = self.sess.post(url=url, data=data, headers=headers)
         return parse_json(resp.text)
 
-    @deprecated
     def _gen_seckill_order_data(self, sku_id, num=1):
         """生成提交抢购订单所需的请求体参数
         :param sku_id: 商品id
@@ -1233,7 +1228,6 @@ class Assistant(object):
         }
         return data
 
-    @deprecated
     def submit_seckill_order(self, sku_id, num=1):
         """提交抢购（秒杀）订单
         :param sku_id: 商品id
@@ -1281,8 +1275,8 @@ class Assistant(object):
             logger.info('抢购失败，返回信息: %s', resp_json)
             return False
 
-    @deprecated
-    def exec_seckill(self, sku_id, retry=4, interval=4, num=1, fast_mode=True):
+    @check_login
+    def exec_seckill(self, sku_id, retry=200, interval=1, num=1, fast_mode=True):
         """立即抢购
 
         抢购商品的下单流程与普通商品不同，不支持加入购物车，可能需要提前预约，主要执行流程如下：
@@ -1313,8 +1307,52 @@ class Assistant(object):
             logger.info('执行结束，抢购%s失败！', sku_id)
             return False
 
-    @deprecated
-    def exec_seckill_by_time(self, sku_ids, buy_time, retry=4, interval=4, num=1, fast_mode=True):
+    def exec_seckill_mutil_process_by_time(self, sku_ids, buy_time, retry=100, interval=1, num=1, fast_mode=True):
+        """定时抢购
+        :param sku_ids: 商品id，多个商品id用逗号进行分割，如"123,456,789"
+        :param buy_time: 下单时间，例如：'2018-09-28 22:45:50.000'
+        :param retry: 抢购重复执行次数，可选参数，默认4次
+        :param interval: 抢购执行间隔，可选参数，默认4秒
+        :param num: 购买数量，可选参数，默认1个
+        :param fast_mode: 快速模式：略过访问抢购订单结算页面这一步骤，默认为 True
+        :return:
+        """
+        items_dict = parse_sku_id(sku_ids=sku_ids)
+        logger.info('准备抢购商品:%s', list(items_dict.keys()))
+
+        tb = Timer(buy_time)
+        tb.start()
+
+        threads = []
+        threadcount = 0
+        while threadcount < 10:
+            th = threading.Thread(self.exec_seckill(sku_ids, retry, interval, num, fast_mode))
+            threads.append(th)
+            th.start()
+            #每个线程间隔0.01秒，即10毫秒
+            time.sleep(0.01)
+            threadcount+=1
+
+        for t in threads:
+            t.join()
+
+    def getJDSystemTime(self):
+        #获取京东服务器时间，需要计算延迟时差，大概30ms
+        url = 'https://a.jd.com//ajax/queryServerData.html'
+        session = requests.session()
+
+        # get server time
+        result = session.get(url).text
+        print(result)
+        servertime = json.loads(result)
+        jdServertime = servertime["serverTime"]
+        print(jdServertime)
+        localtime = jdServertime - 30
+
+        return localtime
+
+
+    def exec_seckill_by_time(self, sku_ids, buy_time, retry=100, interval=1, num=1, fast_mode=True):
         """定时抢购
         :param sku_ids: 商品id，多个商品id用逗号进行分割，如"123,456,789"
         :param buy_time: 下单时间，例如：'2018-09-28 22:45:50.000'
@@ -1369,7 +1407,7 @@ class Assistant(object):
             logger.info('执行结束，提交订单失败！')
 
     @check_login
-    def buy_item_in_stock(self, sku_ids, area, wait_all=False, stock_interval=3, submit_retry=3, submit_interval=5):
+    def buy_item_in_stock(self, sku_ids, area, wait_all=False, stock_interval=1, submit_retry=3, submit_interval=0.5):
         """根据库存自动下单商品
         :param sku_ids: 商品id。可以设置多个商品，也可以带数量，如：'1234' 或 '1234,5678' 或 '1234:2' 或 '1234:2,5678:3'
         :param area: 地区id
